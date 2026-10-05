@@ -1,130 +1,67 @@
-# fleet-template-v1
+# Catch2 template
 
-## What This Template Is
+Provisioned from [`Qode-Fleet-Control/fleet-template-v1`](https://github.com/Qode-Fleet-Control/fleet-template-v1) — the fleet
+lifecycle contract (`bin/`, `fleet.conf`, `compose.yaml`, deploy workflows) with a Catch2 v3 starter laid on top.
 
-`fleet-template-v1` is a **language-agnostic app lifecycle harness** for apps
-managed by the fleet platform. It gives any app — Node, Python, Go, a Docker
-Compose stack, anything — a uniform way to be deployed and controlled, without
-the fleet needing to know a single thing about your stack.
+A small C++17 library (`calc`: gcd, is_prime, fibonacci, split) and its Catch2 v3 test suite, built with CMake and run with CTest. The suite shows `TEST_CASE`s with tags, `SECTION`s, `REQUIRE`/`CHECK`, `CHECK_THROWS_AS`, a data-driven `GENERATE(table<...>)` and matchers (`CHECK_THAT` + `Equals`). The image's default command runs the suite; it exits 0 only when every test passes.
 
-The fleet injects runtime variables into the environment (`PORT`, `BASE_PATH`,
-`DATABASE_URL`) and calls `./bin/run` to deploy. Everything project-specific —
-how to install, build, and start your app — lives in **one file: `fleet.conf`**.
-That is the only file you edit per project.
+## Origin
 
-## Repository Structure
+    hand-written (Catch2 ships no project generator) — CMakeLists.txt follows Catch2's docs/cmake-integration.md: FetchContent_Declare(Catch2 ...) + FetchContent_MakeAvailable, Catch2::Catch2WithMain, include(CTest) + include(Catch) + catch_discover_tests()
 
-```
-fleet.conf        ← the only file you edit per project
-.env              ← local-only env vars (gitignored)
-bin/
-  _common.sh      ← shared logic; never edit this
-  run             ← install + build + start (called by the fleet)
-  start           ← start only (no rebuild)
-  restart         ← stop + full run
-  reload          ← hot-reload config without rebuild
-  stop            ← stop the running process
-```
 
-## The One File You Edit: `fleet.conf`
+## Run it
 
-`fleet.conf` is sourced as shell by the lifecycle scripts. Fill in the commands
-for your stack; leave any command empty (`''`) to skip that step.
+### On the fleet
+
+The fleet runs it as containers (the docker runtime): `bin/run` builds the image with
+`docker compose build` and then stops — this is a job, so `DOCKER_START_CMD` is empty and nothing listens on `$PORT`.
+
+### With docker
 
 ```sh
-NAME="my-app"           # label shown in fleet logs
-PORT="3000"             # default port (fleet overrides via $PORT env var)
-HEALTH_PATH="/"         # HTTP path that returns 200 when the app is ready
-
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/server.js'   # must listen on $PORT; run in foreground
-RELOAD_CMD=''           # optional; empty → falls back to stop+start
+docker compose build
+docker compose run --rm app            # runs the job; exit code = result
 ```
 
-> **Critical rule:** single-quote any command that uses `$PORT` or
-> `$BASE_PATH`. Single quotes defer variable expansion to **runtime** — when the
-> command actually runs, with the fleet-injected value — rather than at the
-> moment `fleet.conf` is sourced (when those values aren't set yet). Use
-> `START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'`, never double quotes.
-
-## How the Lifecycle Works
-
-| Script | What it does | When to use |
-| --- | --- | --- |
-| `bin/run` | `INSTALL_CMD` → `BUILD_CMD` → `START_CMD` | Fleet deploy, fresh start |
-| `bin/start` | `START_CMD` only | Restart without rebuild |
-| `bin/restart` | stop + `bin/run` | After a code/dep change |
-| `bin/reload` | `RELOAD_CMD`, or stop+start if empty | After a config-only change |
-| `bin/stop` | Kill by pidfile or port | Tear down |
-
-> The process PID is written to `.fleet/app.pid` so subsequent `stop`/`restart`
-> calls can find and terminate it reliably. If the pidfile is missing or stale,
-> `stop` falls back to freeing whatever is listening on `$PORT`.
-
-## How to Apply This to Your Project
-
-### Step 1 — Copy the template into your repo
+### Without docker
 
 ```sh
-cp -r fleet-template-v1/* my-project/
+# Debian/Ubuntu: sudo apt install build-essential cmake   (CMake downloads Catch2 itself)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+ctest --test-dir build --output-on-failure    # or run ./build/tests directly
 ```
 
-Or, if starting fresh, just clone it and work from `main`.
+`fleet.conf` drives every script in `bin/`:
 
-### Step 2 — Edit `fleet.conf` (the only required change)
+| step | docker runtime (fleet) | `FLEET_RUNTIME=process` |
+|---|---|---|
+| install | — | `(none)` |
+| build | `docker compose build` | `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j` |
+| start | `(none — a job)` | `(none — a job)` |
 
-Fill in your stack's commands. Per-stack examples:
+## Layout
 
-```sh
-# Node.js
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/index.js'
+- `include/calc/calc.h`, `src/calc.cpp` — the library under test (target `calc`).
+- `tests/calc_test.cpp` — the suite (target `tests`, each `TEST_CASE` registered with CTest by `catch_discover_tests`).
+- `CMakeLists.txt` — Catch2 v3.8.1 by FetchContent, pinned by SHA-256.
+- `Dockerfile` — one `debian:trixie` stage: compiles library and tests at build time as non-root user `app`; `CMD ["ctest", "--test-dir", "build", "--output-on-failure"]`.
+- `compose.yaml` — service `app`, no ports (a job), fleet variables passed through by name.
 
-# Python (Gunicorn)
-INSTALL_CMD='pip install -r requirements.txt'
-BUILD_CMD=''
-START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'
+## Deviations from stock, and why
 
-# Go
-INSTALL_CMD=''
-BUILD_CMD='go build -o ./out/server ./cmd/server'
-START_CMD='./out/server'
+- Catch2 is fetched as the v3.8.1 release tarball with a `URL_HASH`, not the docs' `GIT_REPOSITORY`/`GIT_TAG`: the build needs no git and the download is pinned.
+- The Docker image is single-stage on purpose: `ctest` needs CMake and the build tree at run time.
+- `PORT`, `HEALTH_PATH`, `START_CMD` and `DOCKER_START_CMD` are empty by design: nothing listens on a port, and `bin/run` builds the image and stops there.
 
-# Docker Compose
-INSTALL_CMD=''
-BUILD_CMD='docker compose build'
-START_CMD='docker compose up'
-RELOAD_CMD='docker compose up -d --no-build'
-```
+## Verified
 
-### Step 3 — Set local env vars in `.env` (gitignored)
+2026-10-05, Docker 29.8 on linux/amd64, from the scaffold directory:
 
-```sh
-APP_NAME=My App
-DATABASE_URL=postgres://localhost/mydb
-```
+- `docker compose build` → built (Catch2 fetched and compiled inside the build).
+- `docker compose run --rm app` → exit 0: `100% tests passed, 0 tests failed out of 5`.
+- `docker compose down --rmi local -v` → clean.
 
-### Step 4 — Verify standalone
+The no-docker path (`FLEET_RUNTIME=process`) was not run on a host toolchain; it is the same CMake build the image runs.
 
-```sh
-PORT=3001 bin/run      # should install, build, and serve on 3001
-curl http://localhost:3001/   # should 200
-```
-
-### Step 5 — Connect to the fleet
-
-Point the fleet at your repo. It will clone it, inject `PORT` / `BASE_PATH` /
-`DATABASE_URL`, and call `bin/run`. As long as your `START_CMD` listens on
-`$PORT` and `HEALTH_PATH` returns 200, the fleet will mark the app healthy.
-
-## Key Invariants
-
-- **`START_CMD` must run in the foreground and listen on `$PORT`.** Do not use a
-  dev server — HMR / hot-reload chunks 404 behind the ingress and will break the
-  app.
-- **Never put secrets in `fleet.conf`** — it's committed. Use `.env` locally;
-  the fleet injects secrets via the environment.
-- **`bin/_common.sh` is shared infrastructure** — don't edit it per project. All
-  project-specific configuration belongs in `fleet.conf`.
+See `docs/fleet-lifecycle.md` for the lifecycle contract.
